@@ -68,7 +68,7 @@ class AdmitModal(discord.ui.Modal,
             f"เนื่องจาก : {self.reason.value}")
 
         # ✅ Embed รายงาน
-        embed = discord.Embed(title="🚑 รายงานรับผู้ป่วยบาดเจ็บสาหัส",
+        embed = discord.Embed(title="🚑 รายงานผู้ป่วยบาดเจ็บสาหัส",
                               description=summary,
                               color=discord.Color.dark_red())
 
@@ -87,9 +87,6 @@ class AdmitModal(discord.ui.Modal,
                         inline=True)
         embed.add_field(name="📌 สาเหตุที่นัด",
                         value=self.reason.value,
-                        inline=False)
-        embed.add_field(name="🕓 เวลาที่บาดเจ็บสาหัส",
-                        value=now + " น.",
                         inline=False)
 
         embed.set_image(url=f"attachment://{self.attachment.filename}")
