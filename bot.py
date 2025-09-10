@@ -20,6 +20,7 @@ from commands.delete_command import delete_command
 from commands.help_command import help_command
 from commands.off_duty_command import offduty
 from commands.cancer_command import cancer
+from commands.ot_command import ot
 from handlers.duty_handler import handle_on_message
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -49,6 +50,7 @@ async def on_ready():
         bot.tree.add_command(help_command)
         bot.tree.add_command(offduty)
         bot.tree.add_command(cancer)
+        bot.tree.add_command(ot)
 
         # 🔄 ซิงค์คำสั่งทั้งหมด (global)
         synced = await bot.tree.sync()

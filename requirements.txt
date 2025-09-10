@@ -11,3 +11,4 @@ py-cord==2.6.1
 python-dotenv==1.1.1
 watchdog==6.0.0
 yarl==1.20.1
+pymongo>=4.0.0

@@ -2,14 +2,28 @@ import discord
 from datetime import datetime
 import os
 
-# ✅ แปลงค่า env เป็น int (กันปัญหา string != int)
+from pymongo import MongoClient
+from discord.ui import View, button
+from discord import ButtonStyle
+
+# อ่าน env
 try:
     SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID", 0))
-    TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", 0))
+    CONFIRM_CHANNEL_ID = int(os.getenv("CONFIRM_CHANNEL_ID", 0))
+    MONGO_URI = os.getenv("MONGO_URI")
 except ValueError:
-    print("❌ SOURCE_CHANNEL_ID หรือ TARGET_CHANNEL_ID ไม่ใช่ตัวเลข")
+    print("❌ SOURCE_CHANNEL_ID หรือ CONFIRM_CHANNEL_ID ไม่ใช่ตัวเลข")
     SOURCE_CHANNEL_ID = 0
-    TARGET_CHANNEL_ID = 0
+    CONFIRM_CHANNEL_ID = 0
+    MONGO_URI = None
+
+# DB config
+DB_NAME = "pracharuk_medic"
+COLLECTION_NAME = "Shift_Time"
+
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client[DB_NAME]
+collection = db[COLLECTION_NAME]
 
 
 def parse_footer_time(footer_text):
@@ -26,6 +40,31 @@ def parse_footer_time(footer_text):
     except Exception as e:
         print(f"❌ Failed to parse time from footer '{footer_text}': {e}")
         return None
+
+
+class ConfirmView(View):
+    def __init__(self, data):
+        super().__init__(timeout=None)  # ปิด timeout ให้ปุ่มอยู่ตลอด
+        self.data = data
+
+    @button(label="ยืนยัน", style=ButtonStyle.primary, custom_id="confirm_accept")
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        button.label = f"✅ ยอมรับโดย {interaction.user.display_name}"
+        button.style = ButtonStyle.success
+        for child in self.children:
+            child.disabled = True
+
+        collection.insert_one(self.data)
+        await interaction.response.edit_message(embed=interaction.message.embeds[0], view=self)
+
+    @button(label="ปฏิเสธ", style=ButtonStyle.primary, custom_id="confirm_reject")
+    async def reject_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        button.label = f"❌ ปฏิเสธโดย {interaction.user.display_name}"
+        button.style = ButtonStyle.danger
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(embed=interaction.message.embeds[0], view=self)
 
 
 async def handle_on_message(message: discord.Message, bot: discord.Client):
@@ -78,13 +117,11 @@ async def handle_on_message(message: discord.Message, bot: discord.Client):
 
         print(f"[DEBUG] Checking message:\n  - Title: {prev_title}\n  - Desc: {desc_lower}\n  - Footer: {prev_footer}")
 
-        # ❌ ถ้าเจอ Off Duty ก่อนหน้า → หยุด ไม่คำนวณ
         if desc_lower == "off duty":
             print("❌ พบ Off Duty ก่อนหน้า → ไม่คำนวณ")
             print(f"⚠️ ไม่สามารถคำนวณเวลาให้ {title} ได้ เพราะพบ Off Duty ก่อนหน้า โดยไม่มี On Duty")
             return
 
-        # ✅ เจอ On Duty → คำนวณเวลา
         if desc_lower == "on duty":
             on_time = parse_footer_time(prev_footer)
             if not on_time:
@@ -95,21 +132,32 @@ async def handle_on_message(message: discord.Message, bot: discord.Client):
             hours = duration.total_seconds() / 3600
             print(f"[✅] คำนวณเวลา On -> Off ได้ {hours:.2f} ชั่วโมง")
 
-            result_embed = discord.Embed(
-                title=title,
-                description=f"เวลาการทำงาน {hours:.2f} ชั่วโมง",
-                color=discord.Color.blue()
-            )
-            result_embed.set_footer(text="ตรวจสอบโดย Pracharuk Medic")
-            result_embed.timestamp = datetime.utcnow()
+            data = {
+                "ชื่อ": title,
+                "วันที่": on_time.strftime("%d-%m-%Y"),
+                "ชั่วโมง": round(hours, 2)
+            }
 
-            target_channel = bot.get_channel(TARGET_CHANNEL_ID)
-            if target_channel:
-                await target_channel.send(embed=result_embed)
-                print("[✅] ส่งข้อความคำนวณเวลาไปยัง Target Channel แล้ว")
+            if hours > 8:
+                confirm_embed = discord.Embed(
+                    title=title,
+                    description=f"เวลาการทำงาน {hours:.2f} ชั่วโมง\nกรุณาตรวจสอบ",
+                    color=discord.Color.blue()
+                )
+                confirm_embed.set_footer(text="ตรวจสอบโดย Pracharuk Medic")
+                confirm_embed.timestamp = datetime.utcnow()
+
+                confirm_channel = bot.get_channel(CONFIRM_CHANNEL_ID)
+                if confirm_channel:
+                    view = ConfirmView(data)
+                    await confirm_channel.send(embed=confirm_embed, view=view)
+                    print("[✅] ส่งข้อความรอการยืนยันไปยัง Confirm Channel แล้ว")
+                else:
+                    print(f"❌ ไม่พบ Confirm Channel: {CONFIRM_CHANNEL_ID}")
             else:
-                print(f"❌ ไม่พบ Target Channel: {TARGET_CHANNEL_ID}")
+                collection.insert_one(data)
+                print("[✅] ชั่วโมงไม่เกิน 8 → บันทึกลง MongoDB สำเร็จ (ไม่ส่งข้อความใด ๆ)")
+
             return
 
-    # ⚠️ ไม่เจอทั้ง Off Duty หรือ On Duty ก่อนหน้า
     print(f"⚠️ ไม่พบข้อความ 'On Duty' ล่าสุดสำหรับ {title}")
