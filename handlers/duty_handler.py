@@ -10,7 +10,7 @@ from discord import ButtonStyle
 try:
     SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID", 0))
     CONFIRM_CHANNEL_ID = int(os.getenv("CONFIRM_CHANNEL_ID", 0))
-    MONGO_URI = os.getenv("MONGO_URI")
+    MONGO_URI = os.getenv("MONGO_URL")
 except ValueError:
     print("❌ SOURCE_CHANNEL_ID หรือ CONFIRM_CHANNEL_ID ไม่ใช่ตัวเลข")
     SOURCE_CHANNEL_ID = 0

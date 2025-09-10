@@ -5,11 +5,19 @@ from datetime import datetime
 from pymongo import MongoClient
 import os
 
-# DB setup
-MONGO_URI = os.getenv("MONGO_URI")
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["pracharuk_medic"]
-collection = db["Shift_Time"]
+# ✅ MONGO DB SETUP + DEBUG
+MONGO_URL = os.getenv("MONGO_URL")
+
+try:
+    mongo_client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+    mongo_client.server_info()  # ทดสอบการเชื่อมต่อ
+    db = mongo_client["pracharuk_medic"]
+    collection = db["Shift_Time"]
+    safe_url = MONGO_URL.replace(MONGO_URL.split(':')[2].split('@')[0], "***")
+    print(f"✅ MongoDB เชื่อมต่อสำเร็จ: {safe_url}")
+except Exception as e:
+    print(f"❌ ไม่สามารถเชื่อมต่อ MongoDB ได้: {e}")
+    collection = None
 
 
 class OTModal(Modal, title="ตรวจสอบชั่วโมงเวร"):
@@ -24,6 +32,10 @@ class OTModal(Modal, title="ตรวจสอบชั่วโมงเวร"
         self.add_item(self.end_date)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if collection is None:
+            await interaction.response.send_message("❌ ไม่สามารถเชื่อมต่อฐานข้อมูลได้", ephemeral=True)
+            return
+
         name_val = self.name.value.strip()
         try:
             start = datetime.strptime(self.start_date.value.strip(), "%d-%m-%Y")
@@ -46,7 +58,7 @@ class OTModal(Modal, title="ตรวจสอบชั่วโมงเวร"
             )
             return
 
-        # ดึงข้อมูลจาก DB สำหรับชื่อเฉพาะ
+        # ✅ ดึงข้อมูลจาก DB สำหรับชื่อเฉพาะ
         query = {
             "ชื่อ": name_val,
             "วันที่": {
@@ -54,6 +66,7 @@ class OTModal(Modal, title="ตรวจสอบชั่วโมงเวร"
                 "$lte": end.strftime("%d-%m-%Y")
             }
         }
+
         results = list(collection.find(query))
 
         if not results:
@@ -69,11 +82,9 @@ class OTModal(Modal, title="ตรวจสอบชั่วโมงเวร"
         )
         embed.add_field(name="จำนวนเวร", value=f"{len(results)} ครั้ง", inline=False)
         embed.add_field(name="ชั่วโมงรวม", value=f"{total_hours:.2f} ชั่วโมง", inline=False)
-        # ลบ footer ออก
-        # embed.set_footer(text=f"ตรวจสอบโดย - {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
         embed.timestamp = datetime.utcnow()
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)  # ส่งแบบลับเฉพาะผู้พิมพ์คำสั่ง
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class PasswordModal(Modal, title="กรุณาใส่รหัสผ่านเพื่อยืนยัน"):
@@ -96,7 +107,11 @@ class PasswordModal(Modal, title="กรุณาใส่รหัสผ่า�
             await interaction.response.send_message("❌ รหัสผ่านไม่ถูกต้อง", ephemeral=True)
             return
 
-        # รหัสผ่านถูกต้อง → ดึงข้อมูลทั้งหมด
+        if collection is None:
+            await interaction.response.send_message("❌ ไม่สามารถเชื่อมต่อฐานข้อมูลได้", ephemeral=True)
+            return
+
+        # ✅ รหัสผ่านถูกต้อง → ดึงข้อมูลทั้งหมด
         query = {
             "วันที่": {
                 "$gte": self.start.strftime("%d-%m-%Y"),
@@ -109,7 +124,7 @@ class PasswordModal(Modal, title="กรุณาใส่รหัสผ่า�
             await interaction.response.send_message("ไม่พบข้อมูลในช่วงเวลาดังกล่าว", ephemeral=True)
             return
 
-        # รวมข้อมูลตามชื่อ
+        # ✅ รวมข้อมูลตามชื่อ
         summary = {}
         for entry in results:
             name = entry.get("ชื่อ", "ไม่ระบุ")
