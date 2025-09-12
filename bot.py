@@ -21,7 +21,9 @@ from commands.help_command import help_command
 from commands.off_duty_command import offduty
 from commands.cancer_command import cancer
 from commands.ot_command import ot
+from commands.surgery_command import surgery
 from handlers.duty_handler import handle_on_message
+from handlers.surgery_handler import handle_surgery_message
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -51,6 +53,7 @@ async def on_ready():
         bot.tree.add_command(offduty)
         bot.tree.add_command(cancer)
         bot.tree.add_command(ot)
+        bot.tree.add_command(surgery)
 
         # 🔄 ซิงค์คำสั่งทั้งหมด (global)
         synced = await bot.tree.sync()
@@ -81,6 +84,7 @@ async def restart(interaction: discord.Interaction):
 @bot.event
 async def on_message(message: discord.Message):
     await handle_on_message(message, bot)
+    await handle_surgery_message(message, bot)
     await bot.process_commands(message)
 
 
