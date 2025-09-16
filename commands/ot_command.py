@@ -1,9 +1,14 @@
 import discord
 from discord import app_commands
-from discord.ui import Modal, TextInput, View, button
+from discord.ui import Modal, TextInput, View, button, Button
 from datetime import datetime
 from pymongo import MongoClient
 import os
+import logging
+
+# ✅ Logging Setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ✅ MONGO DB SETUP + DEBUG
 MONGO_URL = os.getenv("MONGO_URL")
@@ -14,9 +19,9 @@ try:
     db = mongo_client["pracharuk_medic"]
     collection = db["Shift_Time"]
     safe_url = MONGO_URL.replace(MONGO_URL.split(':')[2].split('@')[0], "***")
-    print(f"✅ MongoDB เชื่อมต่อสำเร็จ: {safe_url}")
+    logger.info(f"✅ MongoDB เชื่อมต่อสำเร็จ: {safe_url}")
 except Exception as e:
-    print(f"❌ ไม่สามารถเชื่อมต่อ MongoDB ได้: {e}")
+    logger.error(f"❌ ไม่สามารถเชื่อมต่อ MongoDB ได้: {e}")
     collection = None
 
 
@@ -49,7 +54,6 @@ class OTModal(Modal, title="ตรวจสอบชั่วโมงเวร"
             return
 
         if name_val.lower() == "all":
-            # ถ้า all ให้รอ confirm ด้วยปุ่มและ modal รหัสผ่าน
             view = ConfirmAllView(interaction.user, start, end)
             await interaction.response.send_message(
                 "คุณเลือกดูข้อมูลของ **ทุกคน**\nกดปุ่มด้านล่างเพื่อยืนยันและใส่รหัสผ่าน:",
@@ -58,7 +62,6 @@ class OTModal(Modal, title="ตรวจสอบชั่วโมงเวร"
             )
             return
 
-        # ✅ ดึงข้อมูลจาก DB สำหรับชื่อเฉพาะ
         query = {
             "ชื่อ": name_val,
             "วันที่": {
@@ -66,8 +69,8 @@ class OTModal(Modal, title="ตรวจสอบชั่วโมงเวร"
                 "$lte": end.strftime("%d-%m-%Y")
             }
         }
-
         results = list(collection.find(query))
+        logger.info(f"[{name_val}] - พบ {len(results)} รายการในช่วง {start} ถึง {end}")
 
         if not results:
             await interaction.response.send_message("ไม่พบข้อมูลในช่วงเวลาดังกล่าว", ephemeral=True)
@@ -111,7 +114,6 @@ class PasswordModal(Modal, title="กรุณาใส่รหัสผ่า�
             await interaction.response.send_message("❌ ไม่สามารถเชื่อมต่อฐานข้อมูลได้", ephemeral=True)
             return
 
-        # ✅ รหัสผ่านถูกต้อง → ดึงข้อมูลทั้งหมด
         query = {
             "วันที่": {
                 "$gte": self.start.strftime("%d-%m-%Y"),
@@ -119,12 +121,12 @@ class PasswordModal(Modal, title="กรุณาใส่รหัสผ่า�
             }
         }
         results = list(collection.find(query))
+        logger.info(f"[ALL USERS] - พบ {len(results)} รายการ")
 
         if not results:
             await interaction.response.send_message("ไม่พบข้อมูลในช่วงเวลาดังกล่าว", ephemeral=True)
             return
 
-        # ✅ รวมข้อมูลตามชื่อ
         summary = {}
         for entry in results:
             name = entry.get("ชื่อ", "ไม่ระบุ")
@@ -134,30 +136,8 @@ class PasswordModal(Modal, title="กรุณาใส่รหัสผ่า�
             summary[name]["count"] += 1
             summary[name]["hours"] += hours
 
-        embed = discord.Embed(
-            title=f"รวมชั่วโมงการทำงาน {self.start.strftime('%d/%m/%Y')} - {self.end.strftime('%d/%m/%Y')}",
-            color=discord.Color.teal(),
-            timestamp=datetime.utcnow()
-        )
-
-        items = list(summary.items())
-        for i in range(0, len(items), 2):
-            name1, data1 = items[i]
-            value1 = f"เข้าเวร : {data1['count']} ครั้ง\nจำนวน : {data1['hours']:.2f} ชั่วโมง"
-            if i + 1 < len(items):
-                name2, data2 = items[i + 1]
-                value2 = f"เข้าเวร : {data2['count']} ครั้ง\nจำนวน : {data2['hours']:.2f} ชั่วโมง"
-                embed.add_field(name=name1, value=value1, inline=True)
-                embed.add_field(name=name2, value=value2, inline=True)
-            else:
-                embed.add_field(name=name1, value=value1, inline=True)
-
-        embed.set_footer(
-            text=f"ตรวจสอบโดย - {self.requester.display_name}",
-            icon_url="https://cdn.discordapp.com/avatars/1284559774557409342/4e8e1f39efb438c295a49a533b39fce5?size=1024"
-        )
-
-        await interaction.response.send_message(embed=embed, ephemeral=False)
+        paginated_view = PaginatedEmbedView(self.requester, summary, self.start, self.end)
+        await interaction.response.send_message(embed=paginated_view.get_current_embed(), view=paginated_view, ephemeral=False)
         self.view.stop()
 
 
@@ -178,6 +158,71 @@ class ConfirmAllView(View):
         await interaction.response.send_modal(modal)
 
 
+class PaginatedEmbedView(View):
+    def __init__(self, requester: discord.User, summary: dict, start: datetime, end: datetime):
+        super().__init__(timeout=180)
+        self.requester = requester
+        self.start = start
+        self.end = end
+        self.items_per_page = 25  # ⚠️ Discord embed limit
+        self.summary_items = list(summary.items())
+        self.current_page = 0
+        self.max_page = (len(self.summary_items) - 1) // self.items_per_page
+
+        self.previous_button = Button(label="⬅️ ก่อนหน้า", style=discord.ButtonStyle.secondary)
+        self.next_button = Button(label="➡️ ถัดไป", style=discord.ButtonStyle.secondary)
+        self.previous_button.callback = self.go_previous
+        self.next_button.callback = self.go_next
+
+        self.add_item(self.previous_button)
+        self.add_item(self.next_button)
+
+    def get_current_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"รวมชั่วโมงการทำงาน {self.start.strftime('%d/%m/%Y')} - {self.end.strftime('%d/%m/%Y')}",
+            color=discord.Color.teal(),
+            timestamp=datetime.utcnow()
+        )
+
+        start_idx = self.current_page * self.items_per_page
+        end_idx = start_idx + self.items_per_page
+        page_items = self.summary_items[start_idx:end_idx]
+
+        for name, data in page_items:
+            embed.add_field(
+                name=name,
+                value=f"เข้าเวร : {data['count']} ครั้ง\nจำนวน : {data['hours']:.2f} ชั่วโมง",
+                inline=True
+            )
+
+        embed.set_footer(
+            text=f"ตรวจสอบโดย - {self.requester.display_name} | หน้า {self.current_page + 1}/{self.max_page + 1}",
+            icon_url=self.requester.display_avatar.url
+        )
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester.id:
+            await interaction.response.send_message("❌ ปุ่มนี้ไม่ใช่ของคุณ", ephemeral=True)
+            return False
+        return True
+
+    async def go_previous(self, interaction: discord.Interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+            await interaction.response.edit_message(embed=self.get_current_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+    async def go_next(self, interaction: discord.Interaction):
+        if self.current_page < self.max_page:
+            self.current_page += 1
+            await interaction.response.edit_message(embed=self.get_current_embed(), view=self)
+        else:
+            await interaction.response.defer()
+
+
+# ✅ คำสั่ง Slash Command
 @app_commands.command(name="ot", description="คำนวณ OT รวมจากวันที่กำหนด")
 async def ot(interaction: discord.Interaction):
     await interaction.response.send_modal(OTModal())
