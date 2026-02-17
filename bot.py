@@ -22,6 +22,7 @@ from commands.off_duty_command import offduty
 from commands.cancer_command import cancer
 from commands.ot_command import ot
 from commands.surgery_command import surgery
+from commands.insurance_command import insurance
 from handlers.duty_handler import handle_on_message
 from handlers.surgery_handler import handle_surgery_message
 
@@ -54,6 +55,7 @@ async def on_ready():
         bot.tree.add_command(cancer)
         bot.tree.add_command(ot)
         bot.tree.add_command(surgery)
+        bot.tree.add_command(insurance)
 
         # 🔄 ซิงค์คำสั่งทั้งหมด (global)
         synced = await bot.tree.sync()
