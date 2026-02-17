@@ -1,14 +1,23 @@
-aiohappyeyeballs==2.6.1
+# --- Core Library ---
+discord.py==2.6.0
+python-dotenv==1.1.1
+
+# --- Image Processing (สำคัญสำหรับระบบบัตร) ---
+Pillow>=10.0.0
+
+# --- Network & Async ---
 aiohttp==3.12.15
+aiohappyeyeballs==2.6.1
 aiosignal==1.4.0
 attrs==25.3.0
-discord.py==2.6.0
 frozenlist==1.7.0
 idna==3.10
 multidict==6.6.4
 propcache==0.3.2
-py-cord==2.6.1
-python-dotenv==1.1.1
-watchdog==6.0.0
 yarl==1.20.1
+
+# --- Database ---
 pymongo>=4.0.0
+
+# --- Tools ---
+watchdog==6.0.0
