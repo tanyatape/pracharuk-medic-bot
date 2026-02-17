@@ -28,7 +28,7 @@ def process_card_image(profile_bytes, name, gender, phone):
     circular_face = Image.new('RGBA', size, (0, 0, 0, 0))
     circular_face.paste(img_cropped, (0, 0), mask=mask)
 
-    now = datetime.now()
+    now = datetime.now() + timedelta(hours=7)
     expiry = now + timedelta(days=7)
     issue_date = now.strftime("%d/%m/%Y")
     issue_time = now.strftime("%H.%M น.")
