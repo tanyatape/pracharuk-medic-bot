@@ -4,6 +4,7 @@ python-dotenv==1.1.1
 
 # --- Image Processing (สำคัญสำหรับระบบบัตร) ---
 Pillow>=10.0.0
+python-dateutil==2.9.0.post0
 
 # --- Network & Async ---
 aiohttp==3.12.15
