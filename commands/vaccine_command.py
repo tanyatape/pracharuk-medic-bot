@@ -171,7 +171,6 @@ class RabiesVaccineModal(ui.Modal, title="ใบนัดฉีดวัคซ�
         self.attachment = attachment
 
         self.name_input = ui.TextInput(
-            label="ชื่อ - สกุล",
             placeholder="ชื่อคนไข้",
             required=True,
             max_length=80,
