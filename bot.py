@@ -23,7 +23,7 @@ from commands.cancer_command import cancer
 from commands.ot_command import ot
 from commands.surgery_command import surgery
 from commands.insurance_command import insurance
-from commands.vaccine_command import vaccine, RabiesTreatmentView
+from commands.vaccine_command import vaccine, RabiesTreatmentView, TetanusTreatmentView
 from handlers.duty_handler import handle_on_message
 from handlers.surgery_handler import handle_surgery_message
 
@@ -61,6 +61,7 @@ async def on_ready():
 
         if not getattr(bot, "_persistent_views_added", False):
             bot.add_view(RabiesTreatmentView())
+            bot.add_view(TetanusTreatmentView())
             bot._persistent_views_added = True
 
         # 🔄 ซิงค์คำสั่งทั้งหมด (global)

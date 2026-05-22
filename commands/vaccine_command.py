@@ -3,8 +3,11 @@
 import discord
 from discord import app_commands, ui
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict
 import aiohttp
 import io
+import re
 
 # ============================================================
 # CONSTANTS
@@ -15,16 +18,9 @@ THAI_MONTHS = [
     "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"
 ]
 
-DOSE_COUNT = 5
+DONE_EMOJI_BY_COUNT = {3: "3️⃣✅", 5: "5️⃣✅"}
 
-# ระยะเวลานัด (วัน) หลังจากฉีดเข็มที่ N ไปฉีดเข็มที่ N+1
-NEXT_DOSE_DAYS = {1: 3, 2: 7, 3: 14, 4: 30}
-
-# Custom IDs สำหรับ persistent view (ห้ามเปลี่ยน — ใช้ resolve view หลัง bot restart)
-CUSTOM_ID_INJECT = "vaccine_rabies_inject_v1"
-CUSTOM_ID_RESET = "vaccine_rabies_reset_v1"
-
-# Field names ใน Embed (ใช้ทั้งตอนสร้างและ parse กลับ)
+# Field names (ใช้ทั้งตอนสร้างและ parse กลับ)
 FIELD_PATIENT_NAME = "👤 ชื่อคนไข้"
 FIELD_BLOOD = "🩸 กรุ๊ปเลือด"
 FIELD_GENDER = "🦲 เพศ"
@@ -32,12 +28,65 @@ FIELD_STATUS_DOSES = "💉 สถานะวัคซีน"
 FIELD_STATUS_TEXT = "📊 STATUS"
 FIELD_DOCTOR = "👨‍⚕️ แพทย์ผู้ลงบันทึก"
 
-EMBED_TITLE_BASE = "🏥 ระบบวัคซีนป้องกันพิษสุนัขบ้า"
-EMBED_TITLE_DONE = f"{EMBED_TITLE_BASE} 5️⃣✅"
+
+# ============================================================
+# VACCINE CONFIG
+# ============================================================
+
+@dataclass
+class VaccineConfig:
+    key: str
+    display_name: str          # ใช้ในข้อความ "วัคซีนกัน{display_name}"
+    title_base: str
+    dose_count: int
+    # intervals[N] = จำนวนวันที่เพิ่มไปอีก จากการฉีดเข็ม N เพื่อนัดเข็ม N+1
+    intervals: Dict[int, int]
+    inject_custom_id: str
+    reset_custom_id: str
+    color: discord.Color = field(default_factory=lambda: discord.Color.from_rgb(0, 170, 255))
+
+    @property
+    def title_done(self) -> str:
+        emoji = DONE_EMOJI_BY_COUNT.get(self.dose_count, "✅")
+        return f"{self.title_base} {emoji}"
+
+
+RABIES_CONFIG = VaccineConfig(
+    key="rabies",
+    display_name="พิษสุนัขบ้า",
+    title_base="🏥 ระบบวัคซีนป้องกันพิษสุนัขบ้า",
+    dose_count=5,
+    intervals={1: 3, 2: 4, 3: 7, 4: 16},
+    inject_custom_id="vaccine_rabies_inject_v1",
+    reset_custom_id="vaccine_rabies_reset_v1",
+    color=discord.Color.from_rgb(0, 170, 255),
+)
+
+TETANUS_CONFIG = VaccineConfig(
+    key="tetanus",
+    display_name="บาดทะยัก",
+    title_base="🏥 ระบบวัคซีนป้องกันบาดทะยัก",
+    dose_count=3,
+    intervals={1: 15, 2: 16},
+    inject_custom_id="vaccine_tetanus_inject_v1",
+    reset_custom_id="vaccine_tetanus_reset_v1",
+    color=discord.Color.from_rgb(255, 165, 0),
+)
+
+ALL_CONFIGS = [RABIES_CONFIG, TETANUS_CONFIG]
+
+
+def get_config_from_embed(embed: discord.Embed) -> Optional[VaccineConfig]:
+    if not embed.title:
+        return None
+    for cfg in ALL_CONFIGS:
+        if embed.title.startswith(cfg.title_base):
+            return cfg
+    return None
 
 
 # ============================================================
-# HELPERS
+# HELPERS — เวลา / ข้อความ
 # ============================================================
 
 def now_th() -> datetime:
@@ -48,55 +97,99 @@ def thai_date(dt: datetime) -> str:
     return f"{dt.day} {THAI_MONTHS[dt.month]} {dt.year + 543}"
 
 
-def build_dose_lines(doses_done: int) -> str:
-    lines = []
-    for i in range(1, DOSE_COUNT + 1):
-        emoji = "✅" if i <= doses_done else "⬜"
-        lines.append(f"{emoji} เข็มที่ {i}")
+def short_thai_date(dt: datetime) -> str:
+    return f"{dt.day:02d}/{dt.month:02d}/{dt.year + 543}"
+
+
+DOSE_LINE_RE = re.compile(r"^(✅|⬜)\s*เข็มที่\s*(\d+)\s*(?:\((.+?)\))?\s*$")
+
+
+def build_dose_lines(
+    dose_count: int, doses_done: int, dose_dates: List[Optional[str]]
+) -> str:
+    lines: List[str] = []
+    for i in range(1, dose_count + 1):
+        if i <= doses_done:
+            date_str = dose_dates[i - 1] if i - 1 < len(dose_dates) else None
+            if date_str:
+                lines.append(f"✅ เข็มที่ {i} ({date_str})")
+            else:
+                lines.append(f"✅ เข็มที่ {i}")
+        else:
+            lines.append(f"⬜ เข็มที่ {i}")
     return " ,\n".join(lines)
 
 
-def build_status_text(patient_name: str, doses_done: int) -> str:
+def parse_dose_lines(text: str) -> tuple[int, List[Optional[str]]]:
+    doses_done = 0
+    dates: List[Optional[str]] = []
+    for raw in text.split(","):
+        line = raw.strip()
+        m = DOSE_LINE_RE.match(line)
+        if not m:
+            continue
+        emoji, _idx, date_str = m.group(1), m.group(2), m.group(3)
+        if emoji == "✅":
+            doses_done += 1
+            dates.append(date_str.strip() if date_str else None)
+    return doses_done, dates
+
+
+def build_status_text(cfg: VaccineConfig, patient_name: str, doses_done: int) -> str:
     if doses_done == 0:
         return "เริ่มต้นการรักษา"
-    if doses_done >= DOSE_COUNT:
-        return "✅ การรักษาเสร็จสมบูรณ์ (ฉีดครบ 5 เข็ม)"
+    if doses_done >= cfg.dose_count:
+        return f"✅ การรักษาเสร็จสมบูรณ์ (ฉีดครบ {cfg.dose_count} เข็ม)"
 
     next_dose = doses_done + 1
-    days_to_next = NEXT_DOSE_DAYS[doses_done]
+    days_to_next = cfg.intervals[doses_done]
     next_date = now_th() + timedelta(days=days_to_next)
     msg = (
-        f"[ใบนัดฉีดวัคซีนกันพิษสุนัขบ้า] "
-        f"คุณ \"{patient_name}\" "
-        f"นัดฉีดวัคซีนกันพิษสุนัขบ้าเข็มที่ {next_dose} "
+        f"[ใบนัดฉีดวัคซีนกัน{cfg.display_name}] "
+        f'คุณ "{patient_name}" '
+        f"นัดฉีดวัคซีนกัน{cfg.display_name}เข็มที่ {next_dose} "
         f"ใน วันที่ {thai_date(next_date)}"
     )
-    if next_dose < DOSE_COUNT:
+    if next_dose < cfg.dose_count:
         msg += f" และรับใบนัดฉีดเข็มที่ {next_dose + 1}"
     return msg
 
 
+# ============================================================
+# EMBED BUILD / PARSE
+# ============================================================
+
 def build_patient_embed(
+    cfg: VaccineConfig,
     patient_name: str,
     blood_type: str,
     gender: str,
     doctor_name: str,
     doses_done: int,
-    image_url: str | None = None,
+    dose_dates: List[Optional[str]],
+    image_url: Optional[str] = None,
 ) -> discord.Embed:
-    title = EMBED_TITLE_DONE if doses_done >= DOSE_COUNT else EMBED_TITLE_BASE
+    title = cfg.title_done if doses_done >= cfg.dose_count else cfg.title_base
 
     embed = discord.Embed(
         title=title,
         description="[ข้อมูลผู้ป่วย]",
-        color=discord.Color.from_rgb(0, 170, 255),
+        color=cfg.color,
     )
 
     embed.add_field(name=FIELD_PATIENT_NAME, value=patient_name, inline=False)
     embed.add_field(name=FIELD_BLOOD, value=blood_type, inline=True)
     embed.add_field(name=FIELD_GENDER, value=gender, inline=True)
-    embed.add_field(name=FIELD_STATUS_DOSES, value=build_dose_lines(doses_done), inline=False)
-    embed.add_field(name=FIELD_STATUS_TEXT, value=build_status_text(patient_name, doses_done), inline=False)
+    embed.add_field(
+        name=FIELD_STATUS_DOSES,
+        value=build_dose_lines(cfg.dose_count, doses_done, dose_dates),
+        inline=False,
+    )
+    embed.add_field(
+        name=FIELD_STATUS_TEXT,
+        value=build_status_text(cfg, patient_name, doses_done),
+        inline=False,
+    )
     embed.add_field(name=FIELD_DOCTOR, value=doctor_name, inline=False)
 
     if image_url:
@@ -107,27 +200,29 @@ def build_patient_embed(
 
 
 def parse_patient_embed(embed: discord.Embed) -> dict:
-    """อ่าน state ผู้ป่วยจาก embed ของข้อความรายงาน"""
     data = {
         "patient_name": "ไม่ระบุ",
         "blood_type": "-",
         "gender": "-",
         "doctor_name": "-",
         "doses_done": 0,
+        "dose_dates": [],
         "image_url": None,
     }
 
-    for field in embed.fields:
-        if field.name == FIELD_PATIENT_NAME:
-            data["patient_name"] = field.value
-        elif field.name == FIELD_BLOOD:
-            data["blood_type"] = field.value
-        elif field.name == FIELD_GENDER:
-            data["gender"] = field.value
-        elif field.name == FIELD_STATUS_DOSES:
-            data["doses_done"] = field.value.count("✅")
-        elif field.name == FIELD_DOCTOR:
-            data["doctor_name"] = field.value
+    for field_ in embed.fields:
+        if field_.name == FIELD_PATIENT_NAME:
+            data["patient_name"] = field_.value
+        elif field_.name == FIELD_BLOOD:
+            data["blood_type"] = field_.value
+        elif field_.name == FIELD_GENDER:
+            data["gender"] = field_.value
+        elif field_.name == FIELD_STATUS_DOSES:
+            doses_done, dose_dates = parse_dose_lines(field_.value)
+            data["doses_done"] = doses_done
+            data["dose_dates"] = dose_dates
+        elif field_.name == FIELD_DOCTOR:
+            data["doctor_name"] = field_.value
 
     if embed.thumbnail and embed.thumbnail.url:
         data["image_url"] = embed.thumbnail.url
@@ -153,22 +248,31 @@ class VaccineTypeView(ui.View):
 
     @ui.button(label="💉 วัคซีนพิษสุนัขบ้า", style=discord.ButtonStyle.primary)
     async def rabies_button(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_modal(RabiesVaccineModal(self.attachment))
+        await interaction.response.send_modal(
+            VaccineModal(self.attachment, RABIES_CONFIG)
+        )
         self.stop()
 
-    @ui.button(label="💉 วัคซีนบาดทะยัก (เร็ว ๆ นี้)", style=discord.ButtonStyle.secondary, disabled=True)
+    @ui.button(label="💉 วัคซีนบาดทะยัก", style=discord.ButtonStyle.primary)
     async def tetanus_button(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.send_message("🚧 ยังไม่เปิดให้ใช้งาน", ephemeral=True)
+        await interaction.response.send_modal(
+            VaccineModal(self.attachment, TETANUS_CONFIG)
+        )
+        self.stop()
 
 
 # ============================================================
-# MODAL — ใบนัดฉีดวัคซีนพิษสุนัขบ้า
+# MODAL — ฟอร์มกรอกข้อมูลคนไข้ (ใช้ร่วมทุกวัคซีน)
 # ============================================================
 
-class RabiesVaccineModal(ui.Modal, title="ใบนัดฉีดวัคซีนพิษสุนัขบ้า"):
-    def __init__(self, attachment: discord.Attachment):
-        super().__init__(timeout=600)
+class VaccineModal(ui.Modal):
+    def __init__(self, attachment: discord.Attachment, cfg: VaccineConfig):
+        super().__init__(
+            title=f"ใบนัดฉีดวัคซีน{cfg.display_name}",
+            timeout=600,
+        )
         self.attachment = attachment
+        self.cfg = cfg
 
         self.name_input = ui.TextInput(
             placeholder="ชื่อคนไข้",
@@ -223,17 +327,23 @@ class RabiesVaccineModal(ui.Modal, title="ใบนัดฉีดวัคซ�
 
         file = discord.File(io.BytesIO(data), filename=self.attachment.filename)
         embed = build_patient_embed(
+            cfg=self.cfg,
             patient_name=patient_name,
             blood_type=blood_type,
             gender=gender,
             doctor_name=doctor_name,
             doses_done=0,
+            dose_dates=[],
             image_url=f"attachment://{self.attachment.filename}",
         )
 
         patient_msg = await interaction.followup.send(embed=embed, file=file, wait=True)
 
-        treatment_view = RabiesTreatmentView()
+        if self.cfg.key == "rabies":
+            treatment_view: ui.View = RabiesTreatmentView()
+        else:
+            treatment_view = TetanusTreatmentView()
+
         await interaction.channel.send(
             content=(
                 "📋 **รายละเอียดการรักษา**\n"
@@ -253,16 +363,18 @@ class RabiesVaccineModal(ui.Modal, title="ใบนัดฉีดวัคซ�
 
 
 # ============================================================
-# VIEW 2 — ปุ่มควบคุมการรักษา (persistent, ไม่หมดเวลา)
+# BASE TREATMENT VIEW (logic ร่วม) + subclass ต่อวัคซีน (persistent)
 # ============================================================
 
-class RabiesTreatmentView(ui.View):
+class _BaseTreatmentView(ui.View):
+    cfg: VaccineConfig  # override ใน subclass
+
     def __init__(self):
         super().__init__(timeout=None)
 
     async def _fetch_patient_message(
         self, interaction: discord.Interaction
-    ) -> discord.Message | None:
+    ) -> Optional[discord.Message]:
         ref = interaction.message.reference if interaction.message else None
         if not ref or not ref.message_id:
             await interaction.response.send_message(
@@ -277,12 +389,19 @@ class RabiesTreatmentView(ui.View):
             )
             return None
 
-    def _update_button_labels(self, doses_done: int):
-        inject_btn = next((c for c in self.children if getattr(c, "custom_id", None) == CUSTOM_ID_INJECT), None)
+    def _resolve_cfg(self, embed: discord.Embed) -> VaccineConfig:
+        # ใช้ cfg ที่ embed อ้างเป็นหลัก (กันกรณีปุ่ม persistent ถูกผูก embed ผิดประเภท)
+        return get_config_from_embed(embed) or self.cfg
+
+    def _update_button_labels(self, doses_done: int, cfg: VaccineConfig):
+        inject_btn = next(
+            (c for c in self.children if getattr(c, "custom_id", None) == cfg.inject_custom_id),
+            None,
+        )
         if inject_btn is None:
             return
-        if doses_done >= DOSE_COUNT:
-            inject_btn.label = "✅ ครบ 5 เข็มแล้ว"
+        if doses_done >= cfg.dose_count:
+            inject_btn.label = f"✅ ครบ {cfg.dose_count} เข็มแล้ว"
             inject_btn.disabled = True
             inject_btn.style = discord.ButtonStyle.success
         else:
@@ -290,12 +409,7 @@ class RabiesTreatmentView(ui.View):
             inject_btn.disabled = False
             inject_btn.style = discord.ButtonStyle.success
 
-    @ui.button(
-        label="💉 ฉีดเข็มที่ 1",
-        style=discord.ButtonStyle.success,
-        custom_id=CUSTOM_ID_INJECT,
-    )
-    async def inject_button(self, interaction: discord.Interaction, button: ui.Button):
+    async def _handle_inject(self, interaction: discord.Interaction):
         patient_msg = await self._fetch_patient_message(interaction)
         if patient_msg is None:
             return
@@ -305,34 +419,40 @@ class RabiesTreatmentView(ui.View):
             )
             return
 
-        state = parse_patient_embed(patient_msg.embeds[0])
+        embed = patient_msg.embeds[0]
+        cfg = self._resolve_cfg(embed)
+        state = parse_patient_embed(embed)
 
-        if state["doses_done"] >= DOSE_COUNT:
+        if state["doses_done"] >= cfg.dose_count:
             await interaction.response.send_message(
-                "✅ ฉีดครบ 5 เข็มแล้ว ไม่สามารถฉีดเพิ่มได้", ephemeral=True
+                f"✅ ฉีดครบ {cfg.dose_count} เข็มแล้ว ไม่สามารถฉีดเพิ่มได้",
+                ephemeral=True,
             )
             return
 
         new_doses_done = state["doses_done"] + 1
+        new_dates = list(state["dose_dates"])
+        # pad ให้พอดีจำนวน doses_done ก่อน (เผื่อ embed เก่าไม่มีวันที่)
+        while len(new_dates) < state["doses_done"]:
+            new_dates.append(None)
+        new_dates.append(short_thai_date(now_th()))
+
         new_embed = build_patient_embed(
+            cfg=cfg,
             patient_name=state["patient_name"],
             blood_type=state["blood_type"],
             gender=state["gender"],
             doctor_name=state["doctor_name"],
             doses_done=new_doses_done,
+            dose_dates=new_dates,
             image_url=state["image_url"],
         )
         await patient_msg.edit(embed=new_embed)
 
-        self._update_button_labels(new_doses_done)
+        self._update_button_labels(new_doses_done, cfg)
         await interaction.response.edit_message(view=self)
 
-    @ui.button(
-        label="🔄 เริ่มใหม่",
-        style=discord.ButtonStyle.danger,
-        custom_id=CUSTOM_ID_RESET,
-    )
-    async def reset_button(self, interaction: discord.Interaction, button: ui.Button):
+    async def _handle_reset(self, interaction: discord.Interaction):
         patient_msg = await self._fetch_patient_message(interaction)
         if patient_msg is None:
             return
@@ -342,19 +462,64 @@ class RabiesTreatmentView(ui.View):
             )
             return
 
-        state = parse_patient_embed(patient_msg.embeds[0])
+        embed = patient_msg.embeds[0]
+        cfg = self._resolve_cfg(embed)
+        state = parse_patient_embed(embed)
+
         new_embed = build_patient_embed(
+            cfg=cfg,
             patient_name=state["patient_name"],
             blood_type=state["blood_type"],
             gender=state["gender"],
             doctor_name=state["doctor_name"],
             doses_done=0,
+            dose_dates=[],
             image_url=state["image_url"],
         )
         await patient_msg.edit(embed=new_embed)
 
-        self._update_button_labels(0)
+        self._update_button_labels(0, cfg)
         await interaction.response.edit_message(view=self)
+
+
+class RabiesTreatmentView(_BaseTreatmentView):
+    cfg = RABIES_CONFIG
+
+    @ui.button(
+        label="💉 ฉีดเข็มที่ 1",
+        style=discord.ButtonStyle.success,
+        custom_id=RABIES_CONFIG.inject_custom_id,
+    )
+    async def inject_button(self, interaction: discord.Interaction, button: ui.Button):
+        await self._handle_inject(interaction)
+
+    @ui.button(
+        label="🔄 เริ่มใหม่",
+        style=discord.ButtonStyle.danger,
+        custom_id=RABIES_CONFIG.reset_custom_id,
+    )
+    async def reset_button(self, interaction: discord.Interaction, button: ui.Button):
+        await self._handle_reset(interaction)
+
+
+class TetanusTreatmentView(_BaseTreatmentView):
+    cfg = TETANUS_CONFIG
+
+    @ui.button(
+        label="💉 ฉีดเข็มที่ 1",
+        style=discord.ButtonStyle.success,
+        custom_id=TETANUS_CONFIG.inject_custom_id,
+    )
+    async def inject_button(self, interaction: discord.Interaction, button: ui.Button):
+        await self._handle_inject(interaction)
+
+    @ui.button(
+        label="🔄 เริ่มใหม่",
+        style=discord.ButtonStyle.danger,
+        custom_id=TETANUS_CONFIG.reset_custom_id,
+    )
+    async def reset_button(self, interaction: discord.Interaction, button: ui.Button):
+        await self._handle_reset(interaction)
 
 
 # ============================================================
