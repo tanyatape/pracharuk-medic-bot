@@ -4,10 +4,13 @@ import discord
 from discord import app_commands, ui
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import aiohttp
 import io
 import re
+
+# Record ของเข็มที่ฉีดแล้ว: (วันที่, ชื่อคนกดปุ่ม)
+DoseRecord = Tuple[Optional[str], Optional[str]]
 
 # ============================================================
 # CONSTANTS
@@ -104,15 +107,41 @@ def short_thai_date(dt: datetime) -> str:
 DOSE_LINE_RE = re.compile(r"^(✅|⬜)\s*เข็มที่\s*(\d+)\s*(?:\((.+?)\))?\s*$")
 
 
+def _format_dose_meta(date_str: Optional[str], injector: Optional[str]) -> Optional[str]:
+    """รวมวันที่และชื่อคนฉีดเป็นข้อความเดียวในวงเล็บ"""
+    if date_str and injector:
+        return f"{date_str} โดย {injector}"
+    if date_str:
+        return date_str
+    if injector:
+        return f"โดย {injector}"
+    return None
+
+
+def _parse_dose_meta(inner: Optional[str]) -> DoseRecord:
+    """แยกข้อความในวงเล็บกลับเป็น (วันที่, ชื่อคนฉีด)"""
+    if not inner:
+        return (None, None)
+    inner = inner.strip()
+    if "โดย" in inner:
+        date_part, _, name_part = inner.partition("โดย")
+        date_str = date_part.strip() or None
+        injector = name_part.strip() or None
+        return (date_str, injector)
+    return (inner or None, None)
+
+
 def build_dose_lines(
-    dose_count: int, doses_done: int, dose_dates: List[Optional[str]]
+    dose_count: int, doses_done: int, dose_records: List[DoseRecord]
 ) -> str:
     lines: List[str] = []
     for i in range(1, dose_count + 1):
         if i <= doses_done:
-            date_str = dose_dates[i - 1] if i - 1 < len(dose_dates) else None
-            if date_str:
-                lines.append(f"✅ เข็มที่ {i} ({date_str})")
+            rec = dose_records[i - 1] if i - 1 < len(dose_records) else (None, None)
+            date_str, injector = rec
+            meta = _format_dose_meta(date_str, injector)
+            if meta:
+                lines.append(f"✅ เข็มที่ {i} ({meta})")
             else:
                 lines.append(f"✅ เข็มที่ {i}")
         else:
@@ -120,19 +149,19 @@ def build_dose_lines(
     return " ,\n".join(lines)
 
 
-def parse_dose_lines(text: str) -> tuple[int, List[Optional[str]]]:
+def parse_dose_lines(text: str) -> tuple[int, List[DoseRecord]]:
     doses_done = 0
-    dates: List[Optional[str]] = []
+    records: List[DoseRecord] = []
     for raw in text.split(","):
         line = raw.strip()
         m = DOSE_LINE_RE.match(line)
         if not m:
             continue
-        emoji, _idx, date_str = m.group(1), m.group(2), m.group(3)
+        emoji, _idx, inner = m.group(1), m.group(2), m.group(3)
         if emoji == "✅":
             doses_done += 1
-            dates.append(date_str.strip() if date_str else None)
-    return doses_done, dates
+            records.append(_parse_dose_meta(inner))
+    return doses_done, records
 
 
 def build_status_text(cfg: VaccineConfig, patient_name: str, doses_done: int) -> str:
@@ -166,7 +195,7 @@ def build_patient_embed(
     gender: str,
     doctor_name: str,
     doses_done: int,
-    dose_dates: List[Optional[str]],
+    dose_records: List[DoseRecord],
     image_url: Optional[str] = None,
 ) -> discord.Embed:
     title = cfg.title_done if doses_done >= cfg.dose_count else cfg.title_base
@@ -182,7 +211,7 @@ def build_patient_embed(
     embed.add_field(name=FIELD_GENDER, value=gender, inline=True)
     embed.add_field(
         name=FIELD_STATUS_DOSES,
-        value=build_dose_lines(cfg.dose_count, doses_done, dose_dates),
+        value=build_dose_lines(cfg.dose_count, doses_done, dose_records),
         inline=False,
     )
     embed.add_field(
@@ -206,7 +235,7 @@ def parse_patient_embed(embed: discord.Embed) -> dict:
         "gender": "-",
         "doctor_name": "-",
         "doses_done": 0,
-        "dose_dates": [],
+        "dose_records": [],
         "image_url": None,
     }
 
@@ -218,9 +247,9 @@ def parse_patient_embed(embed: discord.Embed) -> dict:
         elif field_.name == FIELD_GENDER:
             data["gender"] = field_.value
         elif field_.name == FIELD_STATUS_DOSES:
-            doses_done, dose_dates = parse_dose_lines(field_.value)
+            doses_done, dose_records = parse_dose_lines(field_.value)
             data["doses_done"] = doses_done
-            data["dose_dates"] = dose_dates
+            data["dose_records"] = dose_records
         elif field_.name == FIELD_DOCTOR:
             data["doctor_name"] = field_.value
 
@@ -333,7 +362,7 @@ class VaccineModal(ui.Modal):
             gender=gender,
             doctor_name=doctor_name,
             doses_done=0,
-            dose_dates=[],
+            dose_records=[],
             image_url=f"attachment://{self.attachment.filename}",
         )
 
@@ -431,11 +460,11 @@ class _BaseTreatmentView(ui.View):
             return
 
         new_doses_done = state["doses_done"] + 1
-        new_dates = list(state["dose_dates"])
-        # pad ให้พอดีจำนวน doses_done ก่อน (เผื่อ embed เก่าไม่มีวันที่)
-        while len(new_dates) < state["doses_done"]:
-            new_dates.append(None)
-        new_dates.append(short_thai_date(now_th()))
+        new_records = list(state["dose_records"])
+        # pad ให้พอดีจำนวน doses_done ก่อน (เผื่อ embed เก่าไม่มีวันที่/ชื่อ)
+        while len(new_records) < state["doses_done"]:
+            new_records.append((None, None))
+        new_records.append((short_thai_date(now_th()), interaction.user.display_name))
 
         new_embed = build_patient_embed(
             cfg=cfg,
@@ -444,7 +473,7 @@ class _BaseTreatmentView(ui.View):
             gender=state["gender"],
             doctor_name=state["doctor_name"],
             doses_done=new_doses_done,
-            dose_dates=new_dates,
+            dose_records=new_records,
             image_url=state["image_url"],
         )
         await patient_msg.edit(embed=new_embed)
@@ -473,7 +502,7 @@ class _BaseTreatmentView(ui.View):
             gender=state["gender"],
             doctor_name=state["doctor_name"],
             doses_done=0,
-            dose_dates=[],
+            dose_records=[],
             image_url=state["image_url"],
         )
         await patient_msg.edit(embed=new_embed)
