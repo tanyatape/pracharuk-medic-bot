@@ -9,8 +9,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 
-if os.environ.get("RAILWAY_ENVIRONMENT") is None:
-    load_dotenv()
+load_dotenv()
 
 from commands.dna_command import matchdna, crimedna
 from commands.drug_command import drug
