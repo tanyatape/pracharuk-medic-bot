@@ -6,6 +6,7 @@ from discord import app_commands
 import os
 import sys
 from datetime import datetime
+from keep_alive import keep_alive
 
 from dotenv import load_dotenv
 
@@ -95,5 +96,5 @@ async def on_message(message: discord.Message):
     await handle_surgery_message(message, bot)
     await bot.process_commands(message)
 
-
+keep_alive()
 bot.run(TOKEN)

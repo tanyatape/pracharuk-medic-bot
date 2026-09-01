@@ -22,3 +22,7 @@ pymongo>=4.0.0
 
 # --- Tools ---
 watchdog==6.0.0
+
+# --- Keep Alive ---
+flask
+gunicorn
