@@ -7,6 +7,8 @@ import os
 import sys
 from datetime import datetime
 from keep_alive import keep_alive
+import asyncio
+import aiohttp
 
 from dotenv import load_dotenv
 
@@ -32,12 +34,24 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+RENDER_URL = "https://pracharuk-medic-bot.onrender.com"
 
 
 def is_owner():
     async def predicate(interaction: discord.Interaction) -> bool:
         return await bot.is_owner(interaction.user)
     return app_commands.check(predicate)
+
+async def self_ping():
+    await asyncio.sleep(10) # รอให้บอทเปิด Server เสร็จก่อน
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(RENDER_URL) as resp:
+                    print(f"⏰ Self-ping status: {resp.status}")
+        except Exception as e:
+            print(f"⚠️ Self-ping failed: {e}")
+        await asyncio.sleep(600) # สะกิดตัวเองทุกๆ 10 นาที (600 วินาที)
 
 
 @bot.event
@@ -70,6 +84,7 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Sync failed: {e}")
     await bot.change_presence(status=discord.Status.online, activity=discord.Game("💊ยาบ้า ยาบ้า ยานรก 💊"))
+    bot.loop.create_task(self_ping())
 
 
 @bot.tree.command(name="reload", description="รีโหลดคำสั่งบอท")
@@ -95,6 +110,9 @@ async def on_message(message: discord.Message):
     await handle_on_message(message, bot)
     await handle_surgery_message(message, bot)
     await bot.process_commands(message)
+
+
+
 
 keep_alive()
 bot.run(TOKEN)
